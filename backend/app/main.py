@@ -11,7 +11,7 @@ from app.schemas import ImportPGNRequest
 from app.engine import StockfishManager, detect_opening
 from app.llm import LLMExplainer
 
-Base.metadata.drop_all(bind=engine) # Optional: Wipe existing legacy schema to apply updates
+# Safely create any missing tables without wiping the existing database schema
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="AI Chess Analyzer API")
