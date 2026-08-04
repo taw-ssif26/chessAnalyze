@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 
 export interface MoveAnalysis {
+  id: number; // Database id for lazy loading requests
   move_number: number;
   san: string;
   uci: string;
@@ -10,7 +11,8 @@ export interface MoveAnalysis {
   best_move: string;
   principal_variation: string[];
   move_quality: string;
-  ai_explanation: string;
+  tactics_detected?: string[];
+  ai_explanation: string | null; // Nullable until on-demand call runs
 }
 
 interface ChessStore {
