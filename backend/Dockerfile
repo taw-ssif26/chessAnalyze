@@ -14,6 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# EXPOSE is documented, but Render overrides this with the $PORT env var
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Shell form evaluates the runtime $PORT variable correctly on Render
+CMD uvicorn app.main:app --host 0.0.0.0 --port $PORT
