@@ -69,6 +69,9 @@ def import_pgn(payload: ImportPGNRequest, db: Session = Depends(get_db)):
         # Analyze current position prior to move
         eval_before_data = engine_manager.analyze_position(fen_before, depth=12)
         
+        # Capture SAN before pushing (board.san() requires the move to be legal on current board)
+        san = board.san(move)
+
         # Make the actual move
         board.push(move)
         fen_after = board.fen()
@@ -109,7 +112,7 @@ def import_pgn(payload: ImportPGNRequest, db: Session = Depends(get_db)):
         move_analysis = MoveAnalysis(
             analysis_id=analysis_record.id,
             move_number=move_number,
-            san=board.san(move) if move_number % 2 != 0 else board.san(move),
+            san=san,
             uci=move.uci(),
             fen=fen_after,
             evaluation_before=eval_before_data["evaluation"],
