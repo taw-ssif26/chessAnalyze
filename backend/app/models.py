@@ -57,8 +57,9 @@ class MoveAnalysis(Base):
     evaluation_after = Column(String, nullable=True)
     best_move = Column(String, nullable=True)
     principal_variation = Column(JSON, nullable=True)
-    move_quality = Column(String, nullable=True) # Blunder, Mistake, Inaccuracy, Excellent, etc.
-    ai_explanation = Column(Text, nullable=True)
+    move_quality = Column(String, nullable=True)
+    tactics_detected = Column(JSON, nullable=True)  # Saved from engine rules
+    ai_explanation = Column(Text, nullable=True)      # Populated on-demand (lazy-loaded)
 
     analysis = relationship("Analysis", back_populates="moves")
 
