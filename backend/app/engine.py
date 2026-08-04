@@ -67,13 +67,14 @@ class StockfishManager:
             # Normalize to White's POV for standard database storage
             score_white = score.white()
             if is_mate:
-                mate_val = score_white.mate()
+                mate_val = score_white.mate() or 0
                 eval_str = f"M{mate_val}"
                 score_raw = (10000 - abs(mate_val)) if mate_val > 0 else (-10000 + abs(mate_val))
             else:
-                score_val = score_white.score() / 100.0
+                raw_score = score_white.score()
+                score_val = (raw_score / 100.0) if raw_score is not None else 0.0
                 eval_str = f"{'+' if score_val > 0 else ''}{score_val:.2f}"
-                score_raw = score_white.score()
+                score_raw = raw_score if raw_score is not None else 0
 
             pv_moves = []
             if "pv" in info:
@@ -96,12 +97,15 @@ class StockfishManager:
         score_color = pov_score.white() if color == chess.WHITE else pov_score.black()
         if score_color.is_mate():
             mate_moves = score_color.mate()
-            if mate_moves > 0:
-                return 10000.0 - mate_moves
-            else:
-                return -10000.0 + abs(mate_moves)
+            if mate_moves is not None:
+                if mate_moves > 0:
+                    return 10000.0 - mate_moves
+                else:
+                    return -10000.0 + abs(mate_moves)
+            return 0.0
         else:
-            return float(score_color.score(default=0))
+            val = score_color.score()
+            return float(val if val is not None else 0.0)
 
     def classify_move(
         self, 
