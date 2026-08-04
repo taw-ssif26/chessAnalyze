@@ -4,7 +4,6 @@ import chess
 import chess.engine
 from typing import Dict, Any, List, Tuple
 
-# Simple Opening Theory DB for matching early book moves
 OPENING_THEORY_SAN = {
     "e4 e5": ("King's Pawn Game", "C20"),
     "e4 c5": ("Sicilian Defense", "B20"),
@@ -30,7 +29,6 @@ OPENING_THEORY_SAN = {
 }
 
 def detect_opening(moves_san: List[str]) -> Tuple[str, str]:
-    """Matches the early game moves sequence against standard openings."""
     for length in range(min(len(moves_san), 6), 0, -1):
         sub_seq = " ".join(moves_san[:length])
         if sub_seq in OPENING_THEORY_SAN:
@@ -44,7 +42,6 @@ class StockfishManager:
             raise FileNotFoundError("Stockfish executable not found. Verify your system path installation.")
 
     def analyze_position(self, fen: str, depth: int = 15) -> Dict[str, Any]:
-        """Runs evaluation and parses score using absolute metrics."""
         board = chess.Board(fen)
         if board.is_game_over():
             result = board.result()
@@ -53,7 +50,7 @@ class StockfishManager:
                 "best_move": "None",
                 "pv": [],
                 "score_raw": 0,
-                "is_mate": False,
+                "is_mate": board.is_checkmate(),
                 "pov_score": None
             }
 
@@ -64,7 +61,6 @@ class StockfishManager:
             score = info["score"]
             is_mate = score.is_mate()
             
-            # Normalize to White's POV for standard database storage
             score_white = score.white()
             if is_mate:
                 mate_val = score_white.mate() or 0
@@ -78,7 +74,13 @@ class StockfishManager:
 
             pv_moves = []
             if "pv" in info:
-                pv_moves = [board.san(move) for move in info["pv"][:4]]
+                temp_board = board.copy()
+                for move in info["pv"][:4]:
+                    try:
+                        pv_moves.append(temp_board.san(move))
+                        temp_board.push(move)
+                    except Exception:
+                        pv_moves.append(move.uci())
 
             best_move = info["pv"][0].uci() if "pv" in info else "None"
 
@@ -92,8 +94,19 @@ class StockfishManager:
             }
 
     @staticmethod
-    def get_score_for_color(pov_score: chess.engine.PovScore, color: chess.Color) -> float:
-        """Converts PovScore to a standard float relative to the active player's side."""
+    def get_score_for_color(pov_score: chess.engine.PovScore, color: chess.Color, board: chess.Board = None) -> float:
+        """Converts PovScore to a standard float, handling terminal game-over evaluations cleanly."""
+        if pov_score is None:
+            if board is not None and board.is_game_over():
+                result = board.result()
+                if result == "1-0":
+                    return 10000.0 if color == chess.WHITE else -10000.0
+                elif result == "0-1":
+                    return -10000.0 if color == chess.WHITE else 10000.0
+                else:
+                    return 0.0
+            return 0.0
+
         score_color = pov_score.white() if color == chess.WHITE else pov_score.black()
         if score_color.is_mate():
             mate_moves = score_color.mate()
@@ -114,18 +127,20 @@ class StockfishManager:
         score_before_pov: chess.engine.PovScore, 
         score_after_pov: chess.engine.PovScore
     ) -> str:
-        """Classifies move quality using absolute Centipawn Loss (CPL) and forced rules."""
+        """Classifies move quality safely using terminal checks and CPL."""
         if board_before.legal_moves.count() == 1:
             return "Forced"
 
         moving_color = board_before.turn
-        before_score = self.get_score_for_color(score_before_pov, moving_color)
-        after_score = self.get_score_for_color(score_after_pov, moving_color)
+        
+        board_after = board_before.copy()
+        board_after.push(move)
 
-        # CPL reflects the drop in evaluation for the side making the move
+        before_score = self.get_score_for_color(score_before_pov, moving_color, board_before)
+        after_score = self.get_score_for_color(score_after_pov, moving_color, board_after)
+
         cpl = before_score - after_score
 
-        # Check for sacrifice patterns (potential Brilliant move)
         is_sac = False
         if board_before.is_capture(move):
             captured_piece = board_before.piece_at(move.to_square)
@@ -150,7 +165,6 @@ class StockfishManager:
 
     @staticmethod
     def detect_tactics(board_before: chess.Board, move: chess.Move) -> List[str]:
-        """Heuristic-based scanning of the position to find active tactical patterns."""
         tactics = []
         board = board_before.copy()
         moving_color = board.turn
@@ -164,7 +178,6 @@ class StockfishManager:
         if board.is_check():
             tactics.append("Check")
 
-        # Fork detection
         attacks = board.attacks(move.to_square)
         valuable_pieces = [chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT]
         targets = []
@@ -175,7 +188,6 @@ class StockfishManager:
         if len(targets) >= 2:
             tactics.append("Fork")
 
-        # Pin detection
         for sq in chess.SQUARES:
             piece = board.piece_at(sq)
             if piece and piece.color == opponent_color:
@@ -183,7 +195,6 @@ class StockfishManager:
                     tactics.append("Pin")
                     break
 
-        # Hanging Piece detection
         dest_attacks = board.attacks(move.to_square)
         for sq in dest_attacks:
             p = board.piece_at(sq)
