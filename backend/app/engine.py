@@ -40,11 +40,16 @@ class StockfishManager:
                 eval_str = f"{'+' if score_val > 0 else ''}{score_val:.2f}"
                 score_raw = score.score()
 
-            # Retrieve principal variation
+            # Retrieve principal variation - must play moves sequentially on a copy
             pv_moves = []
             if "pv" in info:
-                # Get up to 4 moves of principal variation
-                pv_moves = [board.san(move) for move in info["pv"][:4]]
+                pv_board = board.copy()
+                for pv_move in info["pv"][:4]:
+                    try:
+                        pv_moves.append(pv_board.san(pv_move))
+                        pv_board.push(pv_move)
+                    except Exception:
+                        break
 
             best_move = info["pv"][0].uci() if "pv" in info else "None"
 
@@ -59,8 +64,6 @@ class StockfishManager:
     @staticmethod
     def classify_move(score_before: float, score_after: float, is_mate_before: bool, is_mate_after: bool) -> str:
         """Classifies the quality of a move using Centipawn Loss (CPL)."""
-        # Perspective is relative to active side
-        # A positive difference means evaluation got worse for the player moving
         diff = score_before - score_after
         
         if is_mate_before and not is_mate_after:
@@ -85,7 +88,6 @@ class StockfishManager:
         tactics = []
         board = board_before.copy()
         
-        # Check if the square was occupied (Capture)
         if board.is_capture(move):
             tactics.append("Capture")
             
@@ -94,8 +96,6 @@ class StockfishManager:
         if board.is_check():
             tactics.append("Check")
             
-        # Detect basic forks (piece attacking multiple valuable targets)
-        # Evaluated post-move
         valuable_pieces = [chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT]
         attacks = board.attacks(move.to_square)
         target_count = 0
