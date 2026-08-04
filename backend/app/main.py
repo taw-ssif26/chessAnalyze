@@ -1,21 +1,18 @@
 import chess
 import chess.pgn
 import io
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from typing import List
 
 from app.database import get_db, Base, engine
-from app.models import Game, Analysis, MoveAnalysis, SavedPosition
-from app.schemas import ImportPGNRequest, ImportFENRequest, SavePositionRequest
-from app.engine import StockfishManager
-from app.llm import LLMExplainer
+from app.models import Game, Analysis, MoveAnalysis
+from app.schemas import ImportPGNRequest
+from app.engine import StockfishManager, detect_opening
 
-# Auto-generate DB schemas (Simplifies deployment setup for Postgres / SQLite)
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="AI Chess Analyzer API", version="1.0.0")
+app = FastAPI(title="AI Chess Analyzer API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,22 +23,21 @@ app.add_middleware(
 )
 
 engine_manager = StockfishManager()
+from app.llm import LLMExplainer
 llm_explainer = LLMExplainer()
 
 @app.post("/api/import-pgn")
 def import_pgn(payload: ImportPGNRequest, db: Session = Depends(get_db)):
-    """Imports PGN string, parses individual moves, runs engine evaluation, and saves to database."""
     pgn_io = io.StringIO(payload.pgn)
     parsed_game = chess.pgn.read_game(pgn_io)
     
     if not parsed_game:
-        raise HTTPException(status_code=400, detail="Invalid PGN string format provided.")
+        raise HTTPException(status_code=400, detail="Invalid PGN format.")
 
-    # Save initial game metadata
     game_record = Game(
         white_player=parsed_game.headers.get("White", "White"),
         black_player=parsed_game.headers.get("Black", "Black"),
-        event=parsed_game.headers.get("Event", "Casual Game"),
+        event=parsed_game.headers.get("Event", "Casual Match"),
         result=parsed_game.headers.get("Result", "*"),
         opening=parsed_game.headers.get("Opening", "Unknown"),
         eco=parsed_game.headers.get("ECO", ""),
@@ -51,60 +47,74 @@ def import_pgn(payload: ImportPGNRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(game_record)
 
-    # Initialize analysis tracking
-    analysis_record = Analysis(
-        game_id=game_record.id,
-        engine_depth=12,  # Set light depth to ensure fast, free-tier compliance
-    )
+    analysis_record = Analysis(game_id=game_record.id, engine_depth=12)
     db.add(analysis_record)
     db.commit()
     db.refresh(analysis_record)
 
     board = parsed_game.board()
     move_number = 1
+    played_moves_san = []
     
+    # 1. Warm evaluation of starting state
+    current_eval_data = engine_manager.analyze_position(board.fen(), depth=12)
+
     for move in parsed_game.mainline_moves():
         fen_before = board.fen()
+        eval_before_data = current_eval_data # Evaluate from position *before* move occurs
         
-        # Analyze current position prior to move
-        eval_before_data = engine_manager.analyze_position(fen_before, depth=12)
+        san_move = board.san(move)
+        played_moves_san.append(san_move)
         
-        # Capture SAN before pushing (board.san() requires the move to be legal on current board)
-        san = board.san(move)
+        # Determine opening label
+        opening_name, eco_code = detect_opening(played_moves_san)
+        if opening_name != "Custom Setup":
+            game_record.opening = opening_name
+            game_record.eco = eco_code
 
-        # Make the actual move
+        # 2. Make transition
         board.push(move)
         fen_after = board.fen()
         
-        # Analyze outcome position
+        # 3. Analyze the new position (after move)
         eval_after_data = engine_manager.analyze_position(fen_after, depth=12)
+        current_eval_data = eval_after_data # Shift state for next iteration
         
-        # Convert raw scores to comparable floats for standard sizing
-        s_before = float(eval_before_data["score_raw"]) / 100.0
-        s_after = float(eval_after_data["score_raw"]) / 100.0
+        # Parse tactics & verify metrics
+        board_before_temp = chess.Board(fen_before)
+        tactics = engine_manager.detect_tactics(board_before_temp, move)
         
-        # Invert evaluation logic when it is black's perspective to ensure standard alignment
-        if board.turn == chess.WHITE: 
-            # This calculation represents the assessment right before black played
-            # (where it was White's turn to move next)
-            quality = engine_manager.classify_move(
-                s_before, s_after, eval_before_data["is_mate"], eval_after_data["is_mate"]
-            )
-        else:
-            # Move was played by White
-            quality = engine_manager.classify_move(
-                -s_before, -s_after, eval_before_data["is_mate"], eval_after_data["is_mate"]
-            )
+        quality = engine_manager.classify_move(
+            board_before_temp, 
+            move, 
+            eval_before_data["pov_score"], 
+            eval_after_data["pov_score"]
+        )
 
-        # Retrieve structural explanation from LLM using factual constraints
+        # Force book moves for standard theory transitions
+        if len(played_moves_san) <= 8 and opening_name != "Custom Setup":
+            if quality in ["Best", "Excellent", "Good"]:
+                quality = "Book"
+
+        # Safe conversion of best move coordinates to readable SAN string
+        best_move_san = "None"
+        if eval_before_data["best_move"] != "None":
+            try:
+                best_move_san = board_before_temp.san(chess.Move.from_uci(eval_before_data["best_move"]))
+            except Exception:
+                best_move_san = eval_before_data["best_move"]
+
+        # Run AI Explainer
         payload_llm = {
-            "played_move": move.uci(),
-            "best_move": eval_before_data["best_move"],
+            "played_move": san_move,
+            "best_move": best_move_san,
             "evaluation_before": eval_before_data["evaluation"],
             "evaluation_after": eval_after_data["evaluation"],
             "classification": quality,
             "principal_variation": eval_before_data["pv"],
-            "position": fen_before
+            "position": fen_before,
+            "tactics_detected": tactics,
+            "is_forced": quality == "Forced"
         }
         
         ai_text = llm_explainer.explain_move(payload_llm)
@@ -112,12 +122,12 @@ def import_pgn(payload: ImportPGNRequest, db: Session = Depends(get_db)):
         move_analysis = MoveAnalysis(
             analysis_id=analysis_record.id,
             move_number=move_number,
-            san=san,
+            san=san_move,
             uci=move.uci(),
             fen=fen_after,
             evaluation_before=eval_before_data["evaluation"],
             evaluation_after=eval_after_data["evaluation"],
-            best_move=eval_before_data["best_move"],
+            best_move=best_move_san,
             principal_variation=eval_before_data["pv"],
             move_quality=quality,
             ai_explanation=ai_text
@@ -138,13 +148,10 @@ def get_analysis(analysis_id: int, db: Session = Depends(get_db)):
     analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
     if not analysis:
         raise HTTPException(status_code=404, detail="Analysis record not found.")
-        
     moves = db.query(MoveAnalysis).filter(MoveAnalysis.analysis_id == analysis_id).order_by(MoveAnalysis.id).all()
-    
     return {
         "id": analysis.id,
         "game_id": analysis.game_id,
-        "engine_depth": analysis.engine_depth,
         "moves": [
             {
                 "move_number": m.move_number,
